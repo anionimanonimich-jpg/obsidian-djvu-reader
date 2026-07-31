@@ -27,7 +27,7 @@ After enabling, open *Settings → DjVu Reader* and press **Detect now** (or pas
 ## Usage
 
 - Click any `.djvu` file in the file tree — it opens in the reader view.
-- `◀` / `▶` — previous / next page.
+- **Navigation:** the mouse wheel and `↑`/`↓`/`PgUp`/`PgDn`/`Space` scroll the page and flip pages at the top/bottom edge; `←`/`→`/`Home`/`End` jump pages directly; the **slider** scrubs through pages (drag to preview the number, release to jump). Click the page counter to type a page number.
 - `−` / `+` — zoom out / in; **Fit** — fit to width; **Ctrl/⌘ + mouse wheel** over the page — smooth zoom.
 - Zoom level persists across pages; corrupt pages (e.g. from data-recovery tools) are shown as an inline notice while the rest of the book keeps working.
 

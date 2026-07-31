@@ -10,6 +10,7 @@ const IS_DJVU = (s) => /\.djvu?$/i.test(s || "");
 const ZOOM_MIN = 0.3, ZOOM_MAX = 5, ZOOM_STEP = 1.2;
 const CACHE_LIMIT = 40;
 const RENDER_W = 2000, RENDER_H = 3000;
+const WHEEL_LOCK_MS = 200;   // защита от пролёта нескольких страниц одним импульсом колеса
 
 const DEFAULT_SETTINGS = { djvuBinPath: "", debug: false, bookmarks: {} };
 
@@ -105,7 +106,8 @@ class DjvuView extends ItemView {
     this.page = 1; this.total = 0; this.cache = new Map();
     this.filePath = ""; this.absPath = ""; this.domReady = false; this._timer = null;
     this.zoom = 1; this.imgEl = null; this.zoomLbl = null; this.stage = null;
-    this.lbl = null; this.pageInput = null; this.bmBtn = null;
+    this.lbl = null; this.pageInput = null; this.bmBtn = null; this.slider = null;
+    this._wheelLock = false; this._rendering = false; this._pendingRender = false;
   }
   getViewType()    { return VIEW_TYPE; }
   getDisplayText() { return this.filePath ? path.basename(this.filePath) : "DjVu"; }
@@ -121,6 +123,10 @@ class DjvuView extends ItemView {
     this.imgEl.style.maxWidth = "none";
     if (this.stage) this.stage.style.textAlign = this.zoom > 1.001 ? "left" : "center";
   }
+
+  // можно ли ещё скроллить страницу в данном направлении (для умного колеса/стрелок)
+  canScrollUp()   { const s = this.stage; return s && s.scrollTop > 1; }
+  canScrollDown() { const s = this.stage; return s && (s.scrollTop + s.clientHeight < s.scrollHeight - 1); }
 
   askPage() {
     if (!this.pageInput) return;
@@ -153,6 +159,22 @@ class DjvuView extends ItemView {
   }
   openBookmarkList() { if (this.filePath) new BookmarkModal(this.app, this).open(); }
 
+  // клавиатура: умный скролл/лист + прямые клавиши
+  _onKey(e) {
+    const ae = document.activeElement; const tag = ae && ae.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || (ae && ae.isContentEditable)) return; // не мешаем вводу
+    if (this.plugin.activeDjvuView() !== this) return;                                 // только активная читалка
+    const k = e.key;
+    const up = () => { if (this.canScrollUp()) return; e.preventDefault(); this.go(this.page - 1); };
+    const dn = () => { if (this.canScrollDown()) return; e.preventDefault(); this.go(this.page + 1); };
+    if (k === "ArrowLeft")  { e.preventDefault(); this.go(this.page - 1); }
+    else if (k === "ArrowRight") { e.preventDefault(); this.go(this.page + 1); }
+    else if (k === "Home")  { e.preventDefault(); this.go(1); }
+    else if (k === "End")   { e.preventDefault(); this.go(this.total); }
+    else if (k === "ArrowUp" || k === "PageUp" || (k === " " && e.shiftKey)) up();
+    else if (k === "ArrowDown" || k === "PageDown" || (k === " " && !e.shiftKey)) dn();
+  }
+
   showInstallGuide() {
     this.stage.empty();
     const box = this.stage.createDiv({ cls: "djvu-err" });
@@ -167,40 +189,66 @@ class DjvuView extends ItemView {
     c.createDiv({ cls: "djvu-view" }, (wrap) => {
       this.wrap = wrap;
       const bar = wrap.createDiv({ cls: "djvu-bar" });
-      this.btnPrev = bar.createEl("button", { text: "◀", cls: "djvu-btn" });
+
       this.lbl     = bar.createEl("span",  { text: "…", cls: "djvu-page", attr: { title: "Клик — перейти к странице" } });
       this.pageInput = bar.createEl("input", { type: "number", cls: "djvu-page-input" });
       this.pageInput.style.display = "none";
-      this.btnNext = bar.createEl("button", { text: "▶", cls: "djvu-btn" });
+
+      this.slider = bar.createEl("input", { type: "range", cls: "djvu-slider", attr: { min: "1", max: "1", value: "1", title: "Страница 1" } });
+
       bar.createEl("span", { cls: "djvu-sep" });
       const zOut = bar.createEl("button", { text: "−", cls: "djvu-btn", attr: { title: "Уменьшить" } });
       this.zoomLbl = bar.createEl("span", { text: "100%", cls: "djvu-zoom" });
       const zIn  = bar.createEl("button", { text: "+", cls: "djvu-btn", attr: { title: "Увеличить" } });
       const zFit = bar.createEl("button", { text: "Fit", cls: "djvu-btn", attr: { title: "Вписать по ширине" } });
+
       bar.createEl("span", { cls: "djvu-sep" });
       this.bmBtn   = bar.createEl("button", { text: "☆", cls: "djvu-btn djvu-bm-btn", attr: { title: "Закладка" } });
       const bmList = bar.createEl("button", { text: "☰", cls: "djvu-btn", attr: { title: "Список закладок" } });
+
       this.stage = wrap.createDiv({ cls: "djvu-stage" });
 
-      this.btnPrev.onclick = () => this.go(this.page - 1);
-      this.btnNext.onclick = () => this.go(this.page + 1);
+      // ввод номера по клику на счётчик
       this.lbl.onclick = () => this.askPage();
       this.pageInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") { e.preventDefault(); this.commitPageInput(); }
         else if (e.key === "Escape") { this.pageInput.style.display = "none"; this.lbl.style.display = ""; }
       });
       this.pageInput.addEventListener("blur", () => { this.pageInput.style.display = "none"; this.lbl.style.display = ""; });
+
+      // бегунок: при перетаскивании — только номер, переход — по отпусканию (change)
+      this.slider.addEventListener("input", () => {
+        const v = +this.slider.value;
+        this.lbl.setText(v + " / " + this.total);
+        this.slider.setAttribute("title", "Страница " + v);
+      });
+      this.slider.addEventListener("change", () => { this.go(+this.slider.value); });
+
+      // зум
       zOut.onclick = () => this.setZoom(this.zoom / ZOOM_STEP);
       zIn.onclick  = () => this.setZoom(this.zoom * ZOOM_STEP);
       zFit.onclick = () => this.setZoom(1);
-      this.bmBtn.onclick   = () => this.toggleCurrentBookmark();
+
+      // закладки
+      this.bmBtn.onclick = () => this.toggleCurrentBookmark();
       bmList.onclick = () => this.openBookmarkList();
+
+      // колесо: Ctrl/⌘ = зум; иначе умный скролл/лист по вертикали
       this.stage.addEventListener("wheel", (e) => {
-        if (!(e.ctrlKey || e.metaKey)) return;
+        if (e.ctrlKey || e.metaKey) { e.preventDefault(); this.setZoom(this.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12)); return; }
+        if (e.deltaY === 0) return; // горизонтальный импульс — нативный скролл
+        const up = e.deltaY < 0;
+        if (up ? this.canScrollUp() : this.canScrollDown()) return; // есть куда скроллить — нативно
         e.preventDefault();
-        this.setZoom(this.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+        if (this._wheelLock) return;
+        this._wheelLock = true; setTimeout(() => { this._wheelLock = false; }, WHEEL_LOCK_MS);
+        this.go(this.page + (up ? -1 : 1));
       }, { passive: false });
     });
+
+    // клавиатура на window (авто-снятие при закрытии view)
+    this.registerDomEvent(window, "keydown", (e) => this._onKey(e));
+
     this.domReady = true;
     this.stage.setText("Определяю файл…");
     const p = pickPath(this.leaf.getViewState().state) || null;
@@ -222,6 +270,7 @@ class DjvuView extends ItemView {
     this.filePath = p; this.absPath = abs;
     this.cache.clear(); this.page = 1;
     this.stage.empty(); this.lbl.setText("…");
+    if (this.slider) { this.slider.max = String(1); this.slider.value = "1"; }
 
     const ddjvu = this.plugin.getExe("ddjvu");
     if (path.isAbsolute(ddjvu) && !fs.existsSync(ddjvu)) { this.plugin.log("[djvu] заданный путь не существует:", ddjvu); this.showInstallGuide(); return; }
@@ -229,6 +278,7 @@ class DjvuView extends ItemView {
     const r = await run(this.plugin.getExe("djvused"), ["-e", "n", abs]);
     if (r.code === "ENOENT") { this.plugin.log("[djvu] djvused ENOENT"); this.showInstallGuide(); return; }
     this.total = parseInt((r.stdout || "").trim(), 10) || 0;
+    if (this.slider) this.slider.max = String(Math.max(1, this.total));
     if (!this.total) { this.stage.createDiv({ cls: "djvu-err", text: "Не удалось прочитать число страниц — контейнер повреждён или не читается." }); return; }
     await this.render();
   }
@@ -251,36 +301,45 @@ class DjvuView extends ItemView {
   }
 
   async render() {
-    this.lbl.setText(`${this.page} / ${this.total}`);
-    this.updateBookmarkButton();
-    this.stage.empty(); this.imgEl = null;
-    const cached = this.cacheGet(this.page);
-    if (cached) { this.imgEl = this.stage.createEl("img", { attr: { src: cached } }); this.applyZoom(); return; }
+    // coalescing: если рендер уже идёт — запомнить и перерисовать последней страницей после
+    if (this._rendering) { this._pendingRender = true; return; }
+    this._rendering = true;
+    try {
+      this.lbl.setText(`${this.page} / ${this.total}`);
+      if (this.slider) { this.slider.value = String(this.page); this.slider.setAttribute("title", "Страница " + this.page); }
+      this.updateBookmarkButton();
+      this.stage.empty(); this.imgEl = null;
+      const cached = this.cacheGet(this.page);
+      if (cached) { this.imgEl = this.stage.createEl("img", { attr: { src: cached } }); this.applyZoom(); return; }
 
-    let res = await this.tryRender(null);
-    if (res.enoent) { this.showInstallGuide(); return; }
-    let fallback = false;
-    if (!res.ok) {
-      const bg = await this.tryRender("background");
-      if (bg.enoent) { this.showInstallGuide(); return; }
-      if (bg.ok) { res = bg; fallback = true; }
-    }
-
-    if (res.ok) {
-      try {
-        const png = ppmToPng(fs.readFileSync(res.tmp));
-        const url = "data:image/png;base64," + png.toString("base64");
-        try { fs.unlinkSync(res.tmp); } catch (_) {}
-        this.cacheSet(this.page, url);
-        if (fallback) this.stage.createDiv({ cls: "djvu-fallback", text: "Страница повреждена: показан фон без текстового/би-тонального слоя." });
-        this.imgEl = this.stage.createEl("img", { attr: { src: url } });
-        this.applyZoom();
-      } catch (e) {
-        try { fs.unlinkSync(res.tmp); } catch (_) {}
-        this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page}: ошибка PPM→PNG: ${e && e.message}` });
+      let res = await this.tryRender(null);
+      if (res.enoent) { this.showInstallGuide(); return; }
+      let fallback = false;
+      if (!res.ok) {
+        const bg = await this.tryRender("background");
+        if (bg.enoent) { this.showInstallGuide(); return; }
+        if (bg.ok) { res = bg; fallback = true; }
       }
-    } else {
-      this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page} не отрендерилась (code=${res.r.code}). ${(res.r.stderr || "").slice(0, 160) || "Повреждены и текст, и фон — свойство файла."}` });
+
+      if (res.ok) {
+        try {
+          const png = ppmToPng(fs.readFileSync(res.tmp));
+          const url = "data:image/png;base64," + png.toString("base64");
+          try { fs.unlinkSync(res.tmp); } catch (_) {}
+          this.cacheSet(this.page, url);
+          if (fallback) this.stage.createDiv({ cls: "djvu-fallback", text: "Страница повреждена: показан фон без текстового/би-тонального слоя." });
+          this.imgEl = this.stage.createEl("img", { attr: { src: url } });
+          this.applyZoom();
+        } catch (e) {
+          try { fs.unlinkSync(res.tmp); } catch (_) {}
+          this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page}: ошибка PPM→PNG: ${e && e.message}` });
+        }
+      } else {
+        this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page} не отрендерилась (code=${res.r.code}). ${(res.r.stderr || "").slice(0, 160) || "Повреждены и текст, и фон — свойство файла."}` });
+      }
+    } finally {
+      this._rendering = false;
+      if (this._pendingRender) { this._pendingRender = false; this.render(); }
     }
   }
 
@@ -420,7 +479,7 @@ module.exports = class DjvuReaderPlugin extends Plugin {
   async loadSettings() {
     const data = (await this.loadData()) || {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    this.settings.bookmarks = Object.assign({}, data.bookmarks || {});   // свежий объект, без мутации дефолта
+    this.settings.bookmarks = Object.assign({}, data.bookmarks || {});
   }
   async saveSettings() { await this.saveData(this.settings); }
 };

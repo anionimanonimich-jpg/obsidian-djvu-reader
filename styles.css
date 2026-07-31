@@ -26,6 +26,10 @@
   border: 1px solid var(--text-accent); border-radius: 4px;
   background: var(--background-secondary); color: var(--text-normal);
 }
+.djvu-slider {
+  flex: 1; min-width: 80px; height: 22px; margin: 0 2px;
+  cursor: pointer; accent-color: var(--text-accent);
+}
 .djvu-sep  { width: 1px; height: 18px; background: var(--background-modifier-border); margin: 0 4px; }
 .djvu-zoom { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: .8; }
