@@ -1,4 +1,4 @@
-const { Plugin, ItemView, PluginSettingTab, Setting, Notice } = require("obsidian");
+const { Plugin, ItemView, PluginSettingTab, Setting, Notice, Modal } = require("obsidian");
 const { execFile } = require("child_process");
 const zlib = require("zlib");
 const fs   = require("fs");
@@ -11,7 +11,7 @@ const ZOOM_MIN = 0.3, ZOOM_MAX = 5, ZOOM_STEP = 1.2;
 const CACHE_LIMIT = 40;
 const RENDER_W = 2000, RENDER_H = 3000;
 
-const DEFAULT_SETTINGS = { djvuBinPath: "", debug: false };
+const DEFAULT_SETTINGS = { djvuBinPath: "", debug: false, bookmarks: {} };
 
 const run = (cmd, args) => new Promise((res) =>
   execFile(cmd, args, { maxBuffer: 96 * 1024 * 1024, windowsHide: true },
@@ -65,6 +65,38 @@ function ppmToPng(buf) {
   ]);
 }
 
+// ---------- Модалка списка закладок ----------
+class BookmarkModal extends Modal {
+  constructor(app, view) { super(app); this.view = view; }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Закладки: " + (this.view.filePath ? path.basename(this.view.filePath) : "") });
+    this.listEl = contentEl.createDiv({ cls: "djvu-bm-list" });
+    this.renderList();
+  }
+  renderList() {
+    const fp = this.view.filePath;
+    const pages = this.view.plugin.getBookmarks(fp);
+    this.listEl.empty();
+    if (pages.length === 0) {
+      this.listEl.createDiv({ cls: "djvu-bm-empty", text: "Закладок пока нет. Нажмите ★ на нужной странице." });
+      return;
+    }
+    for (const p of pages) {
+      const row = this.listEl.createDiv({ cls: "djvu-bm-row" });
+      const lbl = row.createEl("span", { cls: "page", text: "Страница " + p });
+      lbl.onclick = () => { this.close(); this.view.go(p); };
+      row.createEl("button", { cls: "djvu-btn", text: "Перейти" }).onclick = () => { this.close(); this.view.go(p); };
+      row.createEl("button", { cls: "djvu-btn djvu-bm-del", text: "Удалить" }).onclick = () => {
+        this.view.plugin.toggleBookmark(fp, p);
+        this.view.updateBookmarkButton();
+        this.renderList();
+      };
+    }
+  }
+}
+
 // ---------- View ----------
 class DjvuView extends ItemView {
   constructor(leaf, plugin) {
@@ -73,7 +105,7 @@ class DjvuView extends ItemView {
     this.page = 1; this.total = 0; this.cache = new Map();
     this.filePath = ""; this.absPath = ""; this.domReady = false; this._timer = null;
     this.zoom = 1; this.imgEl = null; this.zoomLbl = null; this.stage = null;
-    this.lbl = null; this.pageInput = null;
+    this.lbl = null; this.pageInput = null; this.bmBtn = null;
   }
   getViewType()    { return VIEW_TYPE; }
   getDisplayText() { return this.filePath ? path.basename(this.filePath) : "DjVu"; }
@@ -90,7 +122,6 @@ class DjvuView extends ItemView {
     if (this.stage) this.stage.style.textAlign = this.zoom > 1.001 ? "left" : "center";
   }
 
-  // переход по номеру: клик по счётчику -> поле ввода
   askPage() {
     if (!this.pageInput) return;
     this.pageInput.value = String(this.page);
@@ -105,6 +136,22 @@ class DjvuView extends ItemView {
     this.lbl.style.display = "";
     if (n) this.go(n);
   }
+
+  // закладки
+  updateBookmarkButton() {
+    if (!this.bmBtn || !this.filePath) return;
+    const on = this.plugin.hasBookmark(this.filePath, this.page);
+    this.bmBtn.setText(on ? "★" : "☆");
+    this.bmBtn.toggleClass("djvu-bm-active", on);
+    this.bmBtn.setAttribute("title", on ? "Убрать закладку (стр. " + this.page + ")" : "Добавить закладку (стр. " + this.page + ")");
+  }
+  toggleCurrentBookmark() {
+    if (!this.filePath) return;
+    const added = this.plugin.toggleBookmark(this.filePath, this.page);
+    this.updateBookmarkButton();
+    new Notice(added ? ("Закладка добавлена: стр. " + this.page) : ("Закладка удалена: стр. " + this.page));
+  }
+  openBookmarkList() { if (this.filePath) new BookmarkModal(this.app, this).open(); }
 
   showInstallGuide() {
     this.stage.empty();
@@ -130,6 +177,9 @@ class DjvuView extends ItemView {
       this.zoomLbl = bar.createEl("span", { text: "100%", cls: "djvu-zoom" });
       const zIn  = bar.createEl("button", { text: "+", cls: "djvu-btn", attr: { title: "Увеличить" } });
       const zFit = bar.createEl("button", { text: "Fit", cls: "djvu-btn", attr: { title: "Вписать по ширине" } });
+      bar.createEl("span", { cls: "djvu-sep" });
+      this.bmBtn   = bar.createEl("button", { text: "☆", cls: "djvu-btn djvu-bm-btn", attr: { title: "Закладка" } });
+      const bmList = bar.createEl("button", { text: "☰", cls: "djvu-btn", attr: { title: "Список закладок" } });
       this.stage = wrap.createDiv({ cls: "djvu-stage" });
 
       this.btnPrev.onclick = () => this.go(this.page - 1);
@@ -143,6 +193,8 @@ class DjvuView extends ItemView {
       zOut.onclick = () => this.setZoom(this.zoom / ZOOM_STEP);
       zIn.onclick  = () => this.setZoom(this.zoom * ZOOM_STEP);
       zFit.onclick = () => this.setZoom(1);
+      this.bmBtn.onclick   = () => this.toggleCurrentBookmark();
+      bmList.onclick = () => this.openBookmarkList();
       this.stage.addEventListener("wheel", (e) => {
         if (!(e.ctrlKey || e.metaKey)) return;
         e.preventDefault();
@@ -183,7 +235,6 @@ class DjvuView extends ItemView {
 
   async go(p) { if (p < 1 || p > this.total) return; this.page = p; await this.render(); }
 
-  // одна попытка рендера с заданным mode (null = полный, 'background' = только фон)
   async tryRender(mode) {
     const tmp = path.join(os.tmpdir(), `djvu_${Date.now()}_${this.page}_${mode || "full"}.ppm`);
     const args = ["-format=ppm", `-page=${this.page}`, `-size=${RENDER_W}x${RENDER_H}`];
@@ -201,6 +252,7 @@ class DjvuView extends ItemView {
 
   async render() {
     this.lbl.setText(`${this.page} / ${this.total}`);
+    this.updateBookmarkButton();
     this.stage.empty(); this.imgEl = null;
     const cached = this.cacheGet(this.page);
     if (cached) { this.imgEl = this.stage.createEl("img", { attr: { src: cached } }); this.applyZoom(); return; }
@@ -209,7 +261,6 @@ class DjvuView extends ItemView {
     if (res.enoent) { this.showInstallGuide(); return; }
     let fallback = false;
     if (!res.ok) {
-      // полный рендер упал (битый JB2) -> пробуем независимый чанк фона (IW44)
       const bg = await this.tryRender("background");
       if (bg.enoent) { this.showInstallGuide(); return; }
       if (bg.ok) { res = bg; fallback = true; }
@@ -274,6 +325,28 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     this.addSettingTab(new DjvuSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new DjvuView(leaf, this));
     this.registerExtensions(["djvu", "djv"], VIEW_TYPE);
+
+    this.addCommand({
+      id: "djvu-toggle-bookmark",
+      name: "Закладка: добавить/убрать на текущей странице",
+      checkCallback: (checking) => {
+        const v = this.activeDjvuView();
+        if (!v || !v.filePath) return false;
+        if (!checking) v.toggleCurrentBookmark();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "djvu-open-bookmarks",
+      name: "Закладки: показать список текущей книги",
+      checkCallback: (checking) => {
+        const v = this.activeDjvuView();
+        if (!v || !v.filePath) return false;
+        if (!checking) v.openBookmarkList();
+        return true;
+      },
+    });
+
     this.ensureWrap();
     try { this.app.workspace.onLayoutReady(() => this.ensureWrap()); }
     catch (_) { setTimeout(() => this.ensureWrap(), 400); }
@@ -283,11 +356,26 @@ module.exports = class DjvuReaderPlugin extends Plugin {
       if (v instanceof DjvuView && !v.filePath) { const p = pickPath(leaf.getViewState().state); if (p) v.loadFile(p); }
     }));
     this.detectBin().then((d) => { this.resolvedBin = d; this.log("[djvu] detected bin dir=", d || "(none)"); });
-    this.log("[djvu] onload ok v1.1");
+    this.log("[djvu] onload ok v1.2");
   }
 
   onunload() { if (_wrappedProto) { if (_origOpenFile) _wrappedProto.openFile = _origOpenFile; _wrappedProto = null; } }
   log(...a) { if (this.settings && this.settings.debug) console.log(...a); }
+  activeDjvuView() { try { return this.app.workspace.getActiveViewOfType(DjvuView) || null; } catch (_) { return null; } }
+
+  // закладки
+  getBookmarks(fp) { const a = this.settings.bookmarks[fp]; return a ? [...a] : []; }
+  hasBookmark(fp, page) { const a = this.settings.bookmarks[fp]; return !!(a && a.includes(page)); }
+  toggleBookmark(fp, page) {
+    const b = this.settings.bookmarks;
+    if (!b[fp]) b[fp] = [];
+    const i = b[fp].indexOf(page);
+    let added;
+    if (i >= 0) { b[fp].splice(i, 1); added = false; if (b[fp].length === 0) delete b[fp]; }
+    else { b[fp].push(page); b[fp].sort((x, y) => x - y); added = true; }
+    this.saveSettings();
+    return added;
+  }
 
   getExe(name) {
     const cfg = (this.settings.djvuBinPath || "").trim();
@@ -329,6 +417,10 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     } catch (e) { return false; }
   }
 
-  async loadSettings() { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
+  async loadSettings() {
+    const data = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    this.settings.bookmarks = Object.assign({}, data.bookmarks || {});   // свежий объект, без мутации дефолта
+  }
   async saveSettings() { await this.saveData(this.settings); }
 };

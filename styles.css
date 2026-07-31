@@ -34,7 +34,21 @@
 .djvu-err { color: #e07a5f; padding: 16px; max-width: 720px; margin: 0 auto; line-height: 1.6; }
 .djvu-err a { color: var(--text-accent); }
 .djvu-hint { opacity: .75; font-size: .9em; }
-.djvu-fallback {
-  color: #d8a24a; font-size: .85em; opacity: .85;
-  margin: 0 auto 8px; max-width: 720px;
+.djvu-fallback { color: #d8a24a; font-size: .85em; opacity: .85; margin: 0 auto 8px; max-width: 720px; }
+
+.djvu-bm-btn { font-size: 16px; line-height: 1; }
+.djvu-bm-active { color: #e0b341; border-color: #e0b341; }
+.djvu-bm-active:hover { border-color: #e0b341; }
+
+.djvu-bm-list { margin-top: 8px; }
+.djvu-bm-empty { opacity: .7; padding: 12px 0; }
+.djvu-bm-row {
+  display: flex; gap: 8px; align-items: center; padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
 }
+.djvu-bm-row .page {
+  flex: 1; font-variant-numeric: tabular-nums; cursor: pointer;
+  padding: 2px 4px; border-radius: 4px;
+}
+.djvu-bm-row .page:hover { background: var(--background-modifier-hover); }
+.djvu-bm-del { color: #e07a5f; }
