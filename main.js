@@ -1,4 +1,4 @@
-const { Plugin, ItemView, PluginSettingTab, Setting } = require("obsidian");
+const { Plugin, ItemView, PluginSettingTab, Setting, Notice } = require("obsidian");
 const { execFile } = require("child_process");
 const zlib = require("zlib");
 const fs   = require("fs");
@@ -8,8 +8,8 @@ const os   = require("os");
 const VIEW_TYPE = "djvu-reader-view";
 const IS_DJVU = (s) => /\.djvu?$/i.test(s || "");
 const ZOOM_MIN = 0.3, ZOOM_MAX = 5, ZOOM_STEP = 1.2;
-const CACHE_LIMIT = 40;          // LRU: старых страниц в памяти не копим
-const RENDER_W = 2000, RENDER_H = 3000;   // запас разрешения для чёткого зума
+const CACHE_LIMIT = 40;
+const RENDER_W = 2000, RENDER_H = 3000;
 
 const DEFAULT_SETTINGS = { djvuBinPath: "", debug: false };
 
@@ -18,7 +18,7 @@ const run = (cmd, args) => new Promise((res) =>
     (e, out, err) => res({ code: e ? (e.code || 1) : 0, stdout: out || "", stderr: err || "" })));
 const pickPath = (s) => s && (s.file || s.path || s.filePath || null);
 
-// ---------- PPM(P6) -> PNG на чистом Node (без зависимостей) ----------
+// ---------- PPM(P6) -> PNG на чистом Node ----------
 function makeCrc32() {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
@@ -73,12 +73,12 @@ class DjvuView extends ItemView {
     this.page = 1; this.total = 0; this.cache = new Map();
     this.filePath = ""; this.absPath = ""; this.domReady = false; this._timer = null;
     this.zoom = 1; this.imgEl = null; this.zoomLbl = null; this.stage = null;
+    this.lbl = null; this.pageInput = null;
   }
   getViewType()    { return VIEW_TYPE; }
   getDisplayText() { return this.filePath ? path.basename(this.filePath) : "DjVu"; }
   getIcon()        { return "book-open"; }
 
-  // LRU-кэш
   cacheGet(p) { if (!this.cache.has(p)) return null; const v = this.cache.get(p); this.cache.delete(p); this.cache.set(p, v); return v; }
   cacheSet(p, url) { if (this.cache.has(p)) this.cache.delete(p); this.cache.set(p, url); while (this.cache.size > CACHE_LIMIT) { const k = this.cache.keys().next().value; this.cache.delete(k); } }
 
@@ -90,13 +90,29 @@ class DjvuView extends ItemView {
     if (this.stage) this.stage.style.textAlign = this.zoom > 1.001 ? "left" : "center";
   }
 
+  // переход по номеру: клик по счётчику -> поле ввода
+  askPage() {
+    if (!this.pageInput) return;
+    this.pageInput.value = String(this.page);
+    this.lbl.style.display = "none";
+    this.pageInput.style.display = "";
+    this.pageInput.focus();
+    this.pageInput.select();
+  }
+  commitPageInput() {
+    const n = parseInt(this.pageInput.value, 10);
+    this.pageInput.style.display = "none";
+    this.lbl.style.display = "";
+    if (n) this.go(n);
+  }
+
   showInstallGuide() {
     this.stage.empty();
     const box = this.stage.createDiv({ cls: "djvu-err" });
     box.createEl("p", { text: "Декодер DjVuLibre не найден." });
-    box.createEl("p", { text: "Это внешний локальный инструмент (работает полностью оффлайн, ничего не уходит в сеть). Установите его и при необходимости укажите путь в Settings → DjVu Reader." });
-    box.createEl("p").createEl("a", { text: "Скачать DjVuLibre (djvu.org / SourceForge)", href: "https://djvu.sourceforge.net/" });
-    box.createEl("p", { cls: "djvu-hint", text: "После установки нажмите «Detect now» в настройках плагина или перезагрузите Obsidian." });
+    box.createEl("p", { text: "Это внешний локальный инструмент (полностью оффлайн). Установите его и при необходимости укажите путь в Settings → DjVu Reader." });
+    box.createEl("p").createEl("a", { text: "Скачать DjVuLibre (SourceForge)", href: "https://djvu.sourceforge.net/" });
+    box.createEl("p", { cls: "djvu-hint", text: "После установки нажмите «Detect now» в настройках или перезагрузите Obsidian." });
   }
 
   async onOpen() {
@@ -105,7 +121,9 @@ class DjvuView extends ItemView {
       this.wrap = wrap;
       const bar = wrap.createDiv({ cls: "djvu-bar" });
       this.btnPrev = bar.createEl("button", { text: "◀", cls: "djvu-btn" });
-      this.lbl     = bar.createEl("span",  { text: "…", cls: "djvu-page" });
+      this.lbl     = bar.createEl("span",  { text: "…", cls: "djvu-page", attr: { title: "Клик — перейти к странице" } });
+      this.pageInput = bar.createEl("input", { type: "number", cls: "djvu-page-input" });
+      this.pageInput.style.display = "none";
       this.btnNext = bar.createEl("button", { text: "▶", cls: "djvu-btn" });
       bar.createEl("span", { cls: "djvu-sep" });
       const zOut = bar.createEl("button", { text: "−", cls: "djvu-btn", attr: { title: "Уменьшить" } });
@@ -113,8 +131,15 @@ class DjvuView extends ItemView {
       const zIn  = bar.createEl("button", { text: "+", cls: "djvu-btn", attr: { title: "Увеличить" } });
       const zFit = bar.createEl("button", { text: "Fit", cls: "djvu-btn", attr: { title: "Вписать по ширине" } });
       this.stage = wrap.createDiv({ cls: "djvu-stage" });
+
       this.btnPrev.onclick = () => this.go(this.page - 1);
       this.btnNext.onclick = () => this.go(this.page + 1);
+      this.lbl.onclick = () => this.askPage();
+      this.pageInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); this.commitPageInput(); }
+        else if (e.key === "Escape") { this.pageInput.style.display = "none"; this.lbl.style.display = ""; }
+      });
+      this.pageInput.addEventListener("blur", () => { this.pageInput.style.display = "none"; this.lbl.style.display = ""; });
       zOut.onclick = () => this.setZoom(this.zoom / ZOOM_STEP);
       zIn.onclick  = () => this.setZoom(this.zoom * ZOOM_STEP);
       zFit.onclick = () => this.setZoom(1);
@@ -158,32 +183,53 @@ class DjvuView extends ItemView {
 
   async go(p) { if (p < 1 || p > this.total) return; this.page = p; await this.render(); }
 
+  // одна попытка рендера с заданным mode (null = полный, 'background' = только фон)
+  async tryRender(mode) {
+    const tmp = path.join(os.tmpdir(), `djvu_${Date.now()}_${this.page}_${mode || "full"}.ppm`);
+    const args = ["-format=ppm", `-page=${this.page}`, `-size=${RENDER_W}x${RENDER_H}`];
+    if (mode) args.push(`-mode=${mode}`);
+    args.push(this.absPath, tmp);
+    const r = await run(this.plugin.getExe("ddjvu"), args);
+    if (r.code === "ENOENT") return { enoent: true };
+    const exists = fs.existsSync(tmp);
+    const size = exists ? fs.statSync(tmp).size : 0;
+    this.plugin.log("[djvu] page", this.page, "mode=", mode || "full", "code=", r.code, "size=", size);
+    if (exists && size > 0) return { ok: true, tmp, r };
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    return { ok: false, r };
+  }
+
   async render() {
     this.lbl.setText(`${this.page} / ${this.total}`);
     this.stage.empty(); this.imgEl = null;
     const cached = this.cacheGet(this.page);
     if (cached) { this.imgEl = this.stage.createEl("img", { attr: { src: cached } }); this.applyZoom(); return; }
-    const tmp = path.join(os.tmpdir(), `djvu_${Date.now()}_${this.page}.ppm`);
-    const r = await run(this.plugin.getExe("ddjvu"), ["-format=ppm", `-page=${this.page}`, `-size=${RENDER_W}x${RENDER_H}`, this.absPath, tmp]);
-    if (r.code === "ENOENT") { this.showInstallGuide(); return; }
-    const exists = fs.existsSync(tmp);
-    const size = exists ? fs.statSync(tmp).size : 0;
-    this.plugin.log("[djvu] page", this.page, "code=", r.code, "size=", size);
-    if (exists && size > 0) {
+
+    let res = await this.tryRender(null);
+    if (res.enoent) { this.showInstallGuide(); return; }
+    let fallback = false;
+    if (!res.ok) {
+      // полный рендер упал (битый JB2) -> пробуем независимый чанк фона (IW44)
+      const bg = await this.tryRender("background");
+      if (bg.enoent) { this.showInstallGuide(); return; }
+      if (bg.ok) { res = bg; fallback = true; }
+    }
+
+    if (res.ok) {
       try {
-        const png = ppmToPng(fs.readFileSync(tmp));
+        const png = ppmToPng(fs.readFileSync(res.tmp));
         const url = "data:image/png;base64," + png.toString("base64");
-        try { fs.unlinkSync(tmp); } catch (_) {}
+        try { fs.unlinkSync(res.tmp); } catch (_) {}
         this.cacheSet(this.page, url);
+        if (fallback) this.stage.createDiv({ cls: "djvu-fallback", text: "Страница повреждена: показан фон без текстового/би-тонального слоя." });
         this.imgEl = this.stage.createEl("img", { attr: { src: url } });
         this.applyZoom();
       } catch (e) {
-        try { fs.unlinkSync(tmp); } catch (_) {}
+        try { fs.unlinkSync(res.tmp); } catch (_) {}
         this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page}: ошибка PPM→PNG: ${e && e.message}` });
       }
     } else {
-      try { fs.unlinkSync(tmp); } catch (_) {}
-      this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page} не отрендерилась (code=${r.code}). ${(r.stderr || "").slice(0, 160) || "Повреждённый слой — свойство файла."}` });
+      this.stage.createDiv({ cls: "djvu-err", text: `Страница ${this.page} не отрендерилась (code=${res.r.code}). ${(res.r.stderr || "").slice(0, 160) || "Повреждены и текст, и фон — свойство файла."}` });
     }
   }
 
@@ -199,7 +245,7 @@ class DjvuSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "DjVu Reader" });
     new Setting(containerEl)
       .setName("Папка DjVuLibre")
-      .setDesc("Путь к папке с ddjvu/djvused. Оставьте пустым — плагин найдёт сам (PATH или стандартные пути). Полностью оффлайн.")
+      .setDesc("Путь к папке с ddjvu/djvused. Оставьте пустым — плагин найдёт сам. Полностью оффлайн.")
       .addText((t) => t.setPlaceholder("авто / PATH").setValue(this.plugin.settings.djvuBinPath)
         .onChange(async (v) => { this.plugin.settings.djvuBinPath = v; await this.plugin.saveSettings(); }));
     new Setting(containerEl)
@@ -212,7 +258,7 @@ class DjvuSettingTab extends PluginSettingTab {
       }));
     new Setting(containerEl)
       .setName("Отладочный лог")
-      .setDesc("Писать [djvu] … в консоль разработчика. Включайте только для диагностики.")
+      .setDesc("Писать [djvu] … в консоль разработчика. Только для диагностики.")
       .addToggle((t) => t.setValue(this.plugin.settings.debug)
         .onChange(async (v) => { this.plugin.settings.debug = v; await this.plugin.saveSettings(); }));
   }
@@ -226,10 +272,8 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     await this.loadSettings();
     this.resolvedBin = "";
     this.addSettingTab(new DjvuSettingTab(this.app, this));
-
     this.registerView(VIEW_TYPE, (leaf) => new DjvuView(leaf, this));
     this.registerExtensions(["djvu", "djv"], VIEW_TYPE);
-
     this.ensureWrap();
     try { this.app.workspace.onLayoutReady(() => this.ensureWrap()); }
     catch (_) { setTimeout(() => this.ensureWrap(), 400); }
@@ -238,13 +282,11 @@ module.exports = class DjvuReaderPlugin extends Plugin {
       const v = leaf && leaf.view;
       if (v instanceof DjvuView && !v.filePath) { const p = pickPath(leaf.getViewState().state); if (p) v.loadFile(p); }
     }));
-
     this.detectBin().then((d) => { this.resolvedBin = d; this.log("[djvu] detected bin dir=", d || "(none)"); });
-    this.log("[djvu] onload ok");
+    this.log("[djvu] onload ok v1.1");
   }
 
   onunload() { if (_wrappedProto) { if (_origOpenFile) _wrappedProto.openFile = _origOpenFile; _wrappedProto = null; } }
-
   log(...a) { if (this.settings && this.settings.debug) console.log(...a); }
 
   getExe(name) {

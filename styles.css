@@ -14,7 +14,18 @@
 }
 .djvu-btn:hover  { background: var(--background-modifier-hover); border-color: var(--text-accent); }
 .djvu-btn:active { transform: translateY(1px) scale(.97); }
-.djvu-page { min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; opacity: .85; }
+.djvu-page {
+  min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; opacity: .85;
+  cursor: pointer; border-radius: 4px; padding: 2px 4px;
+  transition: background .12s ease;
+}
+.djvu-page:hover { background: var(--background-modifier-hover); }
+.djvu-page-input {
+  width: 64px; height: 26px; text-align: center;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--text-accent); border-radius: 4px;
+  background: var(--background-secondary); color: var(--text-normal);
+}
 .djvu-sep  { width: 1px; height: 18px; background: var(--background-modifier-border); margin: 0 4px; }
 .djvu-zoom { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: .8; }
@@ -23,3 +34,7 @@
 .djvu-err { color: #e07a5f; padding: 16px; max-width: 720px; margin: 0 auto; line-height: 1.6; }
 .djvu-err a { color: var(--text-accent); }
 .djvu-hint { opacity: .75; font-size: .9em; }
+.djvu-fallback {
+  color: #d8a24a; font-size: .85em; opacity: .85;
+  margin: 0 auto 8px; max-width: 720px;
+}
