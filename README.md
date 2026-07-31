@@ -4,7 +4,7 @@
 
 Read `.djvu` / `.djv` files directly inside Obsidian — page by page, with zoom — using a **local** DjVuLibre decoder. Fully offline: nothing is ever sent over the network.
 
-![screenn1](docs/screenn1.png)
+![screnn1](docs/screnn1.png)
 ![screen2](docs/screen2.png)
 ## Requirements
 
