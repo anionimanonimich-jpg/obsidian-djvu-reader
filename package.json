@@ -1,0 +1,13 @@
+{
+  "name": "obsidian-djvu-reader",
+  "version": "1.2.0",
+  "description": "Read DjVu files inside Obsidian via a local DjVuLibre decoder (offline).",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.js",
+    "dev": "node esbuild.config.js --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}
