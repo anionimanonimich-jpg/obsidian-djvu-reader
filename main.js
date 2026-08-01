@@ -14,11 +14,18 @@ var CACHE_LIMIT = 40;
 var RENDER_W = 2e3;
 var RENDER_H = 3e3;
 var WHEEL_LOCK_MS = 200;
-var DEFAULT_SETTINGS = { djvuBinPath: "", debug: false, bookmarks: {} };
-var run = (cmd, args) => new Promise((res) => execFile(
+var DEFAULT_SETTINGS = {
+  djvuBinPath: "",
+  tesseractBinPath: "",
+  ocrLangs: "rus+eng",
+  ocrShadowFolder: "_djvu_text",
+  debug: false,
+  bookmarks: {}
+};
+var run = (cmd, args, opts) => new Promise((res) => execFile(
   cmd,
   args,
-  { maxBuffer: 96 * 1024 * 1024, windowsHide: true },
+  Object.assign({ maxBuffer: 96 * 1024 * 1024, windowsHide: true }, opts || {}),
   (e, out, err) => res({ code: e ? e.code || 1 : 0, stdout: out || "", stderr: err || "" })
 ));
 var pickPath = (s) => s && (s.file || s.path || s.filePath || null);
@@ -154,6 +161,8 @@ var DjvuView = class extends ItemView {
     this._wheelLock = false;
     this._rendering = false;
     this._pendingRender = false;
+    this._ocrRunning = false;
+    this._ocrCancelled = false;
   }
   getViewType() {
     return VIEW_TYPE;
@@ -190,7 +199,6 @@ var DjvuView = class extends ItemView {
     this.imgEl.style.maxWidth = "none";
     if (this.stage) this.stage.style.textAlign = this.zoom > 1.001 ? "left" : "center";
   }
-  // можно ли ещё скроллить страницу в данном направлении (для умного колеса/стрелок)
   canScrollUp() {
     const s = this.stage;
     return s && s.scrollTop > 1;
@@ -213,7 +221,6 @@ var DjvuView = class extends ItemView {
     this.lbl.style.display = "";
     if (n) this.go(n);
   }
-  // закладки
   updateBookmarkButton() {
     if (!this.bmBtn || !this.filePath) return;
     const on = this.plugin.hasBookmark(this.filePath, this.page);
@@ -230,7 +237,6 @@ var DjvuView = class extends ItemView {
   openBookmarkList() {
     if (this.filePath) new BookmarkModal(this.app, this).open();
   }
-  // клавиатура: умный скролл/лист + прямые клавиши
   _onKey(e) {
     const ae = document.activeElement;
     const tag = ae && ae.tagName;
@@ -266,9 +272,9 @@ var DjvuView = class extends ItemView {
     this.stage.empty();
     const box = this.stage.createDiv({ cls: "djvu-err" });
     box.createEl("p", { text: "\u0414\u0435\u043A\u043E\u0434\u0435\u0440 DjVuLibre \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D." });
-    box.createEl("p", { text: "\u042D\u0442\u043E \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u0438\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 (\u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043E\u0444\u0444\u043B\u0430\u0439\u043D). \u0423\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 \u0435\u0433\u043E \u0438 \u043F\u0440\u0438 \u043D\u0435\u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E\u0441\u0442\u0438 \u0443\u043A\u0430\u0436\u0438\u0442\u0435 \u043F\u0443\u0442\u044C \u0432 Settings \u2192 DjVu Reader." });
+    box.createEl("p", { text: "\u0412\u043D\u0435\u0448\u043D\u0438\u0439 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u0438\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 (\u043E\u0444\u0444\u043B\u0430\u0439\u043D). \u0423\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435 \u0438 \u043F\u0440\u0438 \u043D\u0435\u043E\u0431\u0445\u043E\u0434\u0438\u043C\u043E\u0441\u0442\u0438 \u0443\u043A\u0430\u0436\u0438\u0442\u0435 \u043F\u0443\u0442\u044C \u0432 Settings \u2192 DjVu Reader." });
     box.createEl("p").createEl("a", { text: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C DjVuLibre (SourceForge)", href: "https://djvu.sourceforge.net/" });
-    box.createEl("p", { cls: "djvu-hint", text: "\u041F\u043E\u0441\u043B\u0435 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xABDetect now\xBB \u0432 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0430\u0445 \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 Obsidian." });
+    box.createEl("p", { cls: "djvu-hint", text: "\u041F\u043E\u0441\u043B\u0435 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xABDetect now\xBB \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 Obsidian." });
   }
   async onOpen() {
     const c = this.containerEl;
@@ -288,6 +294,7 @@ var DjvuView = class extends ItemView {
       bar.createEl("span", { cls: "djvu-sep" });
       this.bmBtn = bar.createEl("button", { text: "\u2606", cls: "djvu-btn djvu-bm-btn", attr: { title: "\u0417\u0430\u043A\u043B\u0430\u0434\u043A\u0430" } });
       const bmList = bar.createEl("button", { text: "\u2630", cls: "djvu-btn", attr: { title: "\u0421\u043F\u0438\u0441\u043E\u043A \u0437\u0430\u043A\u043B\u0430\u0434\u043E\u043A" } });
+      const ocrBtn = bar.createEl("button", { text: "\u{1F50D}", cls: "djvu-btn", attr: { title: "OCR \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B (tesseract.js)" } });
       this.stage = wrap.createDiv({ cls: "djvu-stage" });
       this.lbl.onclick = () => this.askPage();
       this.pageInput.addEventListener("keydown", (e) => {
@@ -316,6 +323,7 @@ var DjvuView = class extends ItemView {
       zFit.onclick = () => this.setZoom(1);
       this.bmBtn.onclick = () => this.toggleCurrentBookmark();
       bmList.onclick = () => this.openBookmarkList();
+      ocrBtn.onclick = () => this.ocrCurrentPageJs();
       this.stage.addEventListener("wheel", (e) => {
         if (e.ctrlKey || e.metaKey) {
           e.preventDefault();
@@ -378,7 +386,7 @@ var DjvuView = class extends ItemView {
     }
     const ddjvu = this.plugin.getExe("ddjvu");
     if (path.isAbsolute(ddjvu) && !fs.existsSync(ddjvu)) {
-      this.plugin.log("[djvu] \u0437\u0430\u0434\u0430\u043D\u043D\u044B\u0439 \u043F\u0443\u0442\u044C \u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442:", ddjvu);
+      this.plugin.log("[djvu] \u043F\u0443\u0442\u044C \u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442:", ddjvu);
       this.showInstallGuide();
       return;
     }
@@ -486,6 +494,150 @@ var DjvuView = class extends ItemView {
       }
     }
   }
+  _clean(...files) {
+    for (const f of files) {
+      try {
+        fs.unlinkSync(f);
+      } catch (_) {
+      }
+    }
+  }
+  // рендер страницы в PNG-файл на диске (для передачи в ocr-worker)
+  async renderPageToPngFile(page) {
+    const res = await this.tryRenderForOcr(page);
+    if (!res.ok) return null;
+    let pngBuf;
+    try {
+      pngBuf = ppmToPng(fs.readFileSync(res.tmp));
+    } catch (e) {
+      console.log("[ocr-js] ppm->png fail", e && e.message);
+      this._clean(res.tmp);
+      return null;
+    }
+    this._clean(res.tmp);
+    const tmpPng = path.join(os.tmpdir(), `djvu_ocrjs_${Date.now()}_${page}.png`);
+    fs.writeFileSync(tmpPng, pngBuf);
+    return tmpPng;
+  }
+  async tryRenderForOcr(page) {
+    const tmp = path.join(os.tmpdir(), `djvu_ocr_${Date.now()}_${page}.ppm`);
+    const r = await run(this.plugin.getExe("ddjvu"), ["-format=ppm", `-page=${page}`, `-size=${RENDER_W}x${RENDER_H}`, this.absPath, tmp]);
+    if (r.code !== 0 || !fs.existsSync(tmp)) {
+      console.log("[ocr-js] ddjvu fail page", page, r.code);
+      this._clean(tmp);
+      return { ok: false };
+    }
+    return { ok: true, tmp };
+  }
+  // OCR одной страницы через отдельный node-процесс (Obsidian.exe как node)
+  async runOcrJs(page) {
+    const pngPath = await this.renderPageToPngFile(page);
+    if (!pngPath) return null;
+    const langs = this.plugin.settings.ocrLangs || "rus+eng";
+    const workerScript = this.plugin.getOcrWorkerPath();
+    const nodeBin = await this.plugin.findNode();
+    console.log("[ocr-js] node bin:", nodeBin, "| spawn page", page, "| langs", langs, "| worker", workerScript, "exists", fs.existsSync(workerScript));
+    const r = await run(nodeBin, [workerScript, pngPath, langs]);
+    this._clean(pngPath);
+    console.log("[ocr-js] child code=", r.code, "| stderr=", (r.stderr || "").slice(0, 800), "| stdout head=", (r.stdout || "").slice(0, 160));
+    if (r.code !== 0) {
+      console.log("[ocr-js] child process failed");
+      return null;
+    }
+    try {
+      const s = r.stdout || "";
+      const a = s.indexOf("{");
+      const b = s.lastIndexOf("}");
+      const jsonStr = a >= 0 && b > a ? s.slice(a, b + 1) : s;
+      const j = JSON.parse(jsonStr);
+      if (j.ok) return j.text || "";
+      console.log("[ocr-js] worker reported error:", j.error);
+      return null;
+    } catch (e) {
+      console.log("[ocr-js] stdout parse fail:", e && e.message, "| stdout=", r.stdout);
+      return null;
+    }
+  }
+  async ocrCurrentPageJs() {
+    if (!this.filePath) return;
+    if (this._ocrRunning) {
+      new Notice("\u0420\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0432\u0430\u043D\u0438\u0435 \u0443\u0436\u0435 \u0438\u0434\u0451\u0442");
+      return;
+    }
+    this._ocrRunning = true;
+    new Notice(`\u0420\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u044E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443 ${this.page} (tesseract.js)\u2026`);
+    try {
+      const text = await this.runOcrJs(this.page);
+      if (text && text.trim() !== "") {
+        await this.saveOcrText(this.page, text);
+        new Notice(`\u0421\u0442\u0440. ${this.page} \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u043D\u0430 \u2192 ${this.plugin.settings.ocrShadowFolder || "_djvu_text"}/`);
+      } else new Notice(`\u0421\u0442\u0440. ${this.page}: \u043F\u0443\u0441\u0442\u043E \u0438\u043B\u0438 \u043E\u0448\u0438\u0431\u043A\u0430 (\u0441\u043C. \u043A\u043E\u043D\u0441\u043E\u043B\u044C [ocr-js])`);
+    } catch (e) {
+      console.log("[ocr-js] ERROR:", e && e.stack || e);
+      new Notice("OCR (js) \u043E\u0448\u0438\u0431\u043A\u0430 \u2014 \u0441\u043C. \u043A\u043E\u043D\u0441\u043E\u043B\u044C [ocr-js]");
+    } finally {
+      this._ocrRunning = false;
+    }
+  }
+  // Наивно: процесс на страницу (медленно для толстых книг; батч-оптимизация — следующий шаг)
+  async ocrWholeBookJs() {
+    if (!this.filePath) return;
+    if (this._ocrRunning) {
+      new Notice("\u0420\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0432\u0430\u043D\u0438\u0435 \u0443\u0436\u0435 \u0438\u0434\u0451\u0442");
+      return;
+    }
+    this._ocrRunning = true;
+    this._ocrCancelled = false;
+    const notice = new Notice("\u0420\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u044E \u043A\u043D\u0438\u0433\u0443 (tesseract.js, \u043F\u043E\u0441\u0442\u0440\u0430\u043D\u0438\u0447\u043D\u043E)\u2026", 0);
+    try {
+      for (let p = 1; p <= this.total; p++) {
+        if (this._ocrCancelled) {
+          notice.setMessage(`\u041E\u0442\u043C\u0435\u043D\u0435\u043D\u043E \u043D\u0430 \u0441\u0442\u0440. ${p}`);
+          setTimeout(() => notice.hide(), 3e3);
+          break;
+        }
+        notice.setMessage(`\u0421\u0442\u0440. ${p} / ${this.total} (tesseract.js)\u2026`);
+        const text = await this.runOcrJs(p);
+        if (text && text.trim() !== "") await this.saveOcrText(p, text);
+      }
+      if (!this._ocrCancelled) {
+        notice.setMessage(`\u0413\u043E\u0442\u043E\u0432\u043E: ${this.total} \u0441\u0442\u0440.`);
+        setTimeout(() => notice.hide(), 3e3);
+      }
+    } catch (e) {
+      console.log("[ocr-js] ERROR:", e && e.stack || e);
+      notice.setMessage("OCR (js) \u043E\u0448\u0438\u0431\u043A\u0430 \u2014 \u0441\u043C. \u043A\u043E\u043D\u0441\u043E\u043B\u044C [ocr-js]");
+      setTimeout(() => notice.hide(), 3e3);
+    } finally {
+      this._ocrRunning = false;
+    }
+  }
+  async saveOcrText(page, text) {
+    const folder = (this.plugin.settings.ocrShadowFolder || "_djvu_text").replace(/^\/+|\/+$/g, "");
+    const fileName = path.basename(this.filePath, path.extname(this.filePath)) + ".md";
+    const filePath = folder + "/" + fileName;
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(folder)) await adapter.mkdir(folder);
+    let content = await adapter.exists(filePath) ? await adapter.read(filePath) : `# ${path.basename(this.filePath, path.extname(this.filePath))}
+
+> OCR-\u0442\u0435\u043A\u0441\u0442 \u0438\u0437 DjVu (tesseract.js). \u0421\u043E\u0437\u0434\u0430\u043D\u043E \u043F\u043B\u0430\u0433\u0438\u043D\u043E\u043C DjVu Reader.
+`;
+    const header = `## \u0421\u0442\u0440\u0430\u043D\u0438\u0446\u0430 ${page}`;
+    const block = `
+${header}
+
+${text.trim()}
+`;
+    const re = new RegExp(`\\n## \u0421\u0442\u0440\u0430\u043D\u0438\u0446\u0430 ${page}\\b[\\s\\S]*?(?=\\n## \u0421\u0442\u0440\u0430\u043D\u0438\u0446\u0430 \\d+|$)`);
+    content = re.test(content) ? content.replace(re, block) : content + block;
+    await adapter.write(filePath, content);
+  }
+  cancelOcr() {
+    if (this._ocrRunning) {
+      this._ocrCancelled = true;
+      new Notice("\u041E\u0442\u043C\u0435\u043D\u044E \u043F\u043E\u0441\u043B\u0435 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B");
+    }
+  }
   async onClose() {
     this.cache.clear();
     if (this._timer) clearTimeout(this._timer);
@@ -500,16 +652,24 @@ var DjvuSettingTab = class extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "DjVu Reader" });
-    new Setting(containerEl).setName("\u041F\u0430\u043F\u043A\u0430 DjVuLibre").setDesc("\u041F\u0443\u0442\u044C \u043A \u043F\u0430\u043F\u043A\u0435 \u0441 ddjvu/djvused. \u041E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 \u043F\u0443\u0441\u0442\u044B\u043C \u2014 \u043F\u043B\u0430\u0433\u0438\u043D \u043D\u0430\u0439\u0434\u0451\u0442 \u0441\u0430\u043C. \u041F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043E\u0444\u0444\u043B\u0430\u0439\u043D.").addText((t) => t.setPlaceholder("\u0430\u0432\u0442\u043E / PATH").setValue(this.plugin.settings.djvuBinPath).onChange(async (v) => {
+    new Setting(containerEl).setName("\u041F\u0430\u043F\u043A\u0430 DjVuLibre").setDesc("\u041F\u0443\u0442\u044C \u043A ddjvu/djvused. \u041F\u0443\u0441\u0442\u043E = \u0430\u0432\u0442\u043E/PATH. \u041E\u0444\u0444\u043B\u0430\u0439\u043D.").addText((t) => t.setPlaceholder("\u0430\u0432\u0442\u043E / PATH").setValue(this.plugin.settings.djvuBinPath).onChange(async (v) => {
       this.plugin.settings.djvuBinPath = v;
       await this.plugin.saveSettings();
     }));
-    new Setting(containerEl).setName("\u041D\u0430\u0439\u0442\u0438 \u0434\u0435\u043A\u043E\u0434\u0435\u0440").setDesc("\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0435 \u043F\u0443\u0442\u0438 \u0438 PATH \u043F\u0440\u044F\u043C\u043E \u0441\u0435\u0439\u0447\u0430\u0441.").addButton((b) => b.setButtonText("Detect now").onClick(async () => {
+    new Setting(containerEl).setName("\u041D\u0430\u0439\u0442\u0438 DjVuLibre").setDesc("\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043F\u0443\u0442\u0438 \u0441\u0435\u0439\u0447\u0430\u0441.").addButton((b) => b.setButtonText("Detect now").onClick(async () => {
       const d = await this.plugin.detectBin();
       this.plugin.resolvedBin = d;
-      new Notice(d ? "DjVuLibre \u043D\u0430\u0439\u0434\u0435\u043D: " + d : "DjVuLibre \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D \u2014 \u0443\u043A\u0430\u0436\u0438\u0442\u0435 \u043F\u0443\u0442\u044C \u0432\u0440\u0443\u0447\u043D\u0443\u044E.");
+      new Notice(d ? "DjVuLibre: " + d : "DjVuLibre \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D.");
     }));
-    new Setting(containerEl).setName("\u041E\u0442\u043B\u0430\u0434\u043E\u0447\u043D\u044B\u0439 \u043B\u043E\u0433").setDesc("\u041F\u0438\u0441\u0430\u0442\u044C [djvu] \u2026 \u0432 \u043A\u043E\u043D\u0441\u043E\u043B\u044C \u0440\u0430\u0437\u0440\u0430\u0431\u043E\u0442\u0447\u0438\u043A\u0430. \u0422\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438.").addToggle((t) => t.setValue(this.plugin.settings.debug).onChange(async (v) => {
+    new Setting(containerEl).setName("\u042F\u0437\u044B\u043A\u0438 OCR").setDesc("\u0427\u0435\u0440\u0435\u0437 +. \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E rus+eng.").addText((t) => t.setPlaceholder("rus+eng").setValue(this.plugin.settings.ocrLangs).onChange(async (v) => {
+      this.plugin.settings.ocrLangs = v;
+      await this.plugin.saveSettings();
+    }));
+    new Setting(containerEl).setName("\u041F\u0430\u043F\u043A\u0430 \u0442\u0435\u043D\u0435\u0439 OCR").setDesc("\u041F\u0430\u043F\u043A\u0430 \u0432 vault \u0434\u043B\u044F \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u043D\u043D\u043E\u0433\u043E \u0442\u0435\u043A\u0441\u0442\u0430. \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E _djvu_text.").addText((t) => t.setPlaceholder("_djvu_text").setValue(this.plugin.settings.ocrShadowFolder).onChange(async (v) => {
+      this.plugin.settings.ocrShadowFolder = v;
+      await this.plugin.saveSettings();
+    }));
+    new Setting(containerEl).setName("\u041E\u0442\u043B\u0430\u0434\u043E\u0447\u043D\u044B\u0439 \u043B\u043E\u0433").setDesc("[djvu]/[ocr-js] \u0432 \u043A\u043E\u043D\u0441\u043E\u043B\u044C. \u0422\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438.").addToggle((t) => t.setValue(this.plugin.settings.debug).onChange(async (v) => {
       this.plugin.settings.debug = v;
       await this.plugin.saveSettings();
     }));
@@ -527,20 +687,50 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     this.addCommand({
       id: "djvu-toggle-bookmark",
       name: "\u0417\u0430\u043A\u043B\u0430\u0434\u043A\u0430: \u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C/\u0443\u0431\u0440\u0430\u0442\u044C \u043D\u0430 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0435",
-      checkCallback: (checking) => {
+      checkCallback: (c) => {
         const v = this.activeDjvuView();
         if (!v || !v.filePath) return false;
-        if (!checking) v.toggleCurrentBookmark();
+        if (!c) v.toggleCurrentBookmark();
         return true;
       }
     });
     this.addCommand({
       id: "djvu-open-bookmarks",
       name: "\u0417\u0430\u043A\u043B\u0430\u0434\u043A\u0438: \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0441\u043F\u0438\u0441\u043E\u043A \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u043A\u043D\u0438\u0433\u0438",
-      checkCallback: (checking) => {
+      checkCallback: (c) => {
         const v = this.activeDjvuView();
         if (!v || !v.filePath) return false;
-        if (!checking) v.openBookmarkList();
+        if (!c) v.openBookmarkList();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "djvu-ocr-page",
+      name: "OCR: \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0442\u044C \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443 (tesseract.js)",
+      checkCallback: (c) => {
+        const v = this.activeDjvuView();
+        if (!v || !v.filePath) return false;
+        if (!c) v.ocrCurrentPageJs();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "djvu-ocr-book",
+      name: "OCR: \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0442\u044C \u0432\u0441\u044E \u043A\u043D\u0438\u0433\u0443 (tesseract.js, \u043F\u043E\u0441\u0442\u0440\u0430\u043D\u0438\u0447\u043D\u043E)",
+      checkCallback: (c) => {
+        const v = this.activeDjvuView();
+        if (!v || !v.filePath) return false;
+        if (!c) v.ocrWholeBookJs();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "djvu-ocr-cancel",
+      name: "OCR: \u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0432\u0430\u043D\u0438\u0435",
+      checkCallback: (c) => {
+        const v = this.activeDjvuView();
+        if (!v || !v.filePath) return false;
+        if (!c) v.cancelOcr();
         return true;
       }
     });
@@ -562,7 +752,7 @@ module.exports = class DjvuReaderPlugin extends Plugin {
       this.resolvedBin = d;
       this.log("[djvu] detected bin dir=", d || "(none)");
     });
-    this.log("[djvu] onload ok v1.2");
+    this.log("[djvu] onload ok v1.3-js");
   }
   onunload() {
     if (_wrappedProto) {
@@ -580,7 +770,54 @@ module.exports = class DjvuReaderPlugin extends Plugin {
       return null;
     }
   }
-  // закладки
+  getPluginDir() {
+    const md = this.manifest.dir || "";
+    if (path.isAbsolute(md)) return md;
+    try {
+      const base = this.app.vault.adapter.getBasePath && this.app.vault.adapter.getBasePath();
+      if (base) return path.join(base, md);
+    } catch (_) {
+    }
+    return path.resolve(md);
+  }
+  getOcrWorkerPath() {
+    return path.join(this.getPluginDir(), "ocr-worker.js");
+  }
+  async findNode() {
+    if (this._nodePath) return this._nodePath;
+    const pf = process.env.ProgramFiles || "C:\\Program Files";
+    const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+    const local = process.env.LOCALAPPDATA || "";
+    const appdata = process.env.APPDATA || "";
+    const cands = [
+      path.join(pf, "nodejs", "node.exe"),
+      path.join(pf86, "nodejs", "node.exe")
+    ];
+    if (local) cands.push(path.join(local, "Programs", "nodejs", "node.exe"));
+    if (appdata) cands.push(path.join(appdata, "npm", "node.exe"));
+    for (const c of cands) {
+      try {
+        if (fs.existsSync(c)) {
+          this._nodePath = c;
+          return c;
+        }
+      } catch (_) {
+      }
+    }
+    try {
+      const r = await run(os.platform() === "win32" ? "where" : "which", ["node"]);
+      if (r.code === 0) {
+        const f = (r.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+        if (f) {
+          this._nodePath = f;
+          return f;
+        }
+      }
+    } catch (_) {
+    }
+    this._nodePath = "node";
+    return this._nodePath;
+  }
   getBookmarks(fp) {
     const a = this.settings.bookmarks[fp];
     return a ? [...a] : [];
@@ -607,8 +844,7 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     return added;
   }
   getExe(name) {
-    const cfg = (this.settings.djvuBinPath || "").trim();
-    const dir = cfg || this.resolvedBin || "";
+    const dir = (this.settings.djvuBinPath || "").trim() || this.resolvedBin || "";
     const base = dir ? path.join(dir, name) : name;
     return os.platform() === "win32" && !path.extname(base) ? base + ".exe" : base;
   }
@@ -617,15 +853,13 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     const cfg = (this.settings.djvuBinPath || "").trim();
     if (cfg) cands.push(cfg);
     if (os.platform() === "win32") cands.push("C:/Program Files/DjVuLibre", "C:/Program Files (x86)/DjVuLibre");
-    const binName = os.platform() === "win32" ? "ddjvu.exe" : "ddjvu";
-    for (const d of cands) {
-      if (fs.existsSync(path.join(d, binName))) return d.replace(/\\/g, "/");
-    }
+    const bin = os.platform() === "win32" ? "ddjvu.exe" : "ddjvu";
+    for (const d of cands) if (fs.existsSync(path.join(d, bin))) return d.replace(/\\/g, "/");
     try {
       const r = await run(os.platform() === "win32" ? "where" : "which", ["ddjvu"]);
       if (r.code === 0) {
-        const first = (r.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
-        if (first) return path.dirname(first).replace(/\\/g, "/");
+        const f = (r.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+        if (f) return path.dirname(f).replace(/\\/g, "/");
       }
     } catch (_) {
     }
