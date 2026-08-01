@@ -1,9 +1,9 @@
 {
   "id": "djvu-reader",
   "name": "DjVu Reader",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "minAppVersion": "1.0.0",
-  "description": "Read DjVu files inside Obsidian via a local DjVuLibre decoder. Offline, with wheel/keyboard/slider navigation and bookmarks.",
+  "description": "Read DjVu inside Obsidian via local DjVuLibre; offline OCR (tesseract.js) into searchable text shadows; a cover shelf grouped by folders; bookmarks; wheel/keyboard/slider navigation.",
   "author": "Egor",
   "isDesktopOnly": true
 }

@@ -6,6 +6,7 @@ var fs = require("fs");
 var path = require("path");
 var os = require("os");
 var VIEW_TYPE = "djvu-reader-view";
+var VIEW_TYPE_SHELF = "djvu-shelf-view";
 var IS_DJVU = (s) => /\.djvu?$/i.test(s || "");
 var ZOOM_MIN = 0.3;
 var ZOOM_MAX = 5;
@@ -13,6 +14,8 @@ var ZOOM_STEP = 1.2;
 var CACHE_LIMIT = 40;
 var RENDER_W = 2e3;
 var RENDER_H = 3e3;
+var COVER_W = 320;
+var COVER_H = 480;
 var WHEEL_LOCK_MS = 200;
 var DEFAULT_SETTINGS = {
   djvuBinPath: "",
@@ -29,6 +32,7 @@ var run = (cmd, args, opts) => new Promise((res) => execFile(
   (e, out, err) => res({ code: e ? e.code || 1 : 0, stdout: out || "", stderr: err || "" })
 ));
 var pickPath = (s) => s && (s.file || s.path || s.filePath || null);
+var cleanName = (p) => path.basename(p).replace(/\.djvu?$/i, "");
 function makeCrc32() {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -502,7 +506,6 @@ var DjvuView = class extends ItemView {
       }
     }
   }
-  // рендер страницы в PNG-файл на диске (для передачи в ocr-worker)
   async renderPageToPngFile(page) {
     const res = await this.tryRenderForOcr(page);
     if (!res.ok) return null;
@@ -529,7 +532,6 @@ var DjvuView = class extends ItemView {
     }
     return { ok: true, tmp };
   }
-  // OCR одной страницы через отдельный node-процесс (Obsidian.exe как node)
   async runOcrJs(page) {
     const pngPath = await this.renderPageToPngFile(page);
     if (!pngPath) return null;
@@ -579,7 +581,6 @@ var DjvuView = class extends ItemView {
       this._ocrRunning = false;
     }
   }
-  // Наивно: процесс на страницу (медленно для толстых книг; батч-оптимизация — следующий шаг)
   async ocrWholeBookJs() {
     if (!this.filePath) return;
     if (this._ocrRunning) {
@@ -643,6 +644,146 @@ ${text.trim()}
     if (this._timer) clearTimeout(this._timer);
   }
 };
+var ShelfView = class extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.scrollEl = null;
+    this.observer = null;
+    this.coverFiles = /* @__PURE__ */ new Map();
+    this.coverCache = /* @__PURE__ */ new Map();
+  }
+  getViewType() {
+    return VIEW_TYPE_SHELF;
+  }
+  getDisplayText() {
+    return "\u0411\u0438\u0431\u043B\u0438\u043E\u0442\u0435\u043A\u0430";
+  }
+  getIcon() {
+    return "library";
+  }
+  async onOpen() {
+    const c = this.containerEl;
+    c.empty();
+    c.createDiv({ cls: "djvu-shelf" }, (scroll) => {
+      this.scrollEl = scroll;
+      const head = scroll.createDiv({ cls: "djvu-shelf-head" });
+      const titleWrap = head.createDiv({ cls: "djvu-shelf-titlewrap" });
+      titleWrap.createEl("h1", { text: "\u0411\u0438\u0431\u043B\u0438\u043E\u0442\u0435\u043A\u0430", cls: "djvu-shelf-h1" });
+      this.counter = titleWrap.createEl("div", { cls: "djvu-shelf-counter", text: "\u0441\u043A\u0430\u043D\u0438\u0440\u0443\u044E\u2026" });
+      const refresh = head.createEl("button", { cls: "djvu-btn djvu-shelf-refresh", text: "\u21BB \u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C", attr: { title: "\u041F\u0435\u0440\u0435\u0441\u043A\u0430\u043D\u0438\u0440\u043E\u0432\u0430\u0442\u044C vault" } });
+      refresh.onclick = () => this.buildShelf();
+      this.body = scroll.createDiv({ cls: "djvu-shelf-body" });
+    });
+    this.observer = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const cover = e.target;
+        const file = this.coverFiles.get(cover);
+        this.observer.unobserve(cover);
+        if (file) this.renderCover(cover, file);
+      }
+    }, { root: this.scrollEl, rootMargin: "300px 0px" });
+    await this.buildShelf();
+  }
+  async buildShelf() {
+    this.body.empty();
+    this.coverFiles.clear();
+    const files = this.app.vault.getFiles().filter((f) => IS_DJVU(f.path));
+    const groups = /* @__PURE__ */ new Map();
+    for (const f of files) {
+      const dir = f.parent ? f.parent.path : "";
+      const label = dir ? dir : "\u041A\u043E\u0440\u0435\u043D\u044C \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0430";
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(f);
+    }
+    const labels = [...groups.keys()].sort((a, b) => a.localeCompare(b, "ru"));
+    for (const lab of labels) groups.get(lab).sort((a, b) => a.basename.localeCompare(b.basename, "ru"));
+    this.counter.setText(`${files.length} ${this.plural(files.length, "\u043A\u043D\u0438\u0433\u0430", "\u043A\u043D\u0438\u0433\u0438", "\u043A\u043D\u0438\u0433")} \xB7 ${labels.length} ${this.plural(labels.length, "\u0440\u0430\u0437\u0434\u0435\u043B", "\u0440\u0430\u0437\u0434\u0435\u043B\u0430", "\u0440\u0430\u0437\u0434\u0435\u043B\u043E\u0432")} \xB7 \u043F\u0440\u0438\u0432\u0430\u0442\u043D\u043E, \u043E\u0444\u0444\u043B\u0430\u0439\u043D`);
+    if (files.length === 0) {
+      this.body.createDiv({ cls: "djvu-shelf-empty", text: "\u0412 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435 \u043D\u0435\u0442 .djvu / .djv \u0444\u0430\u0439\u043B\u043E\u0432." });
+      return;
+    }
+    for (const lab of labels) {
+      const list = groups.get(lab);
+      const sec = this.body.createDiv({ cls: "djvu-shelf-section" });
+      const secHead = sec.createDiv({ cls: "djvu-shelf-section-head" });
+      secHead.createEl("h2", { text: lab, cls: "djvu-shelf-section-title" });
+      secHead.createEl("span", { cls: "djvu-shelf-section-count", text: String(list.length) });
+      const row = sec.createDiv({ cls: "djvu-shelf-row" });
+      for (const f of list) {
+        const cover = row.createDiv({ cls: "djvu-cover", attr: { title: cleanName(f.path) } });
+        const art = cover.createDiv({ cls: "djvu-cover-art" });
+        art.createDiv({ cls: "djvu-cover-shimmer" });
+        cover.createEl("div", { cls: "djvu-cover-title", text: cleanName(f.path) });
+        cover.onclick = () => this.openBook(f);
+        this.coverFiles.set(cover, f);
+        this.observer.observe(cover);
+      }
+      requestAnimationFrame(() => sec.classList.add("is-visible"));
+    }
+  }
+  plural(n, one, few, many) {
+    const m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+    return many;
+  }
+  async renderCover(cover, file) {
+    const art = cover.querySelector(".djvu-cover-art");
+    if (!art) return;
+    const fp = file.path;
+    if (this.coverCache.has(fp)) {
+      this.paintCover(art, this.coverCache.get(fp));
+      return;
+    }
+    const abs = this.app.vault.adapter.getFullPath ? this.app.vault.adapter.getFullPath(fp) : fp;
+    const tmp = path.join(os.tmpdir(), `djvu_cover_${Date.now()}_${Math.random().toString(36).slice(2)}.ppm`);
+    const r = await run(this.plugin.getExe("ddjvu"), ["-format=ppm", "-page=1", `-size=${COVER_W}x${COVER_H}`, abs, tmp]);
+    if (r.code !== 0 || !fs.existsSync(tmp)) {
+      art.classList.add("djvu-cover-empty");
+      const sh = art.querySelector(".djvu-cover-shimmer");
+      if (sh) sh.remove();
+      art.createEl("span", { cls: "djvu-cover-noart", text: "\u043D\u0435\u0442 \u043E\u0431\u043B\u043E\u0436\u043A\u0438" });
+      return;
+    }
+    let url = "";
+    try {
+      url = "data:image/png;base64," + ppmToPng(fs.readFileSync(tmp)).toString("base64");
+    } catch (e) {
+      this.plugin.log("[shelf] cover ppm->png fail", e && e.message);
+    }
+    try {
+      fs.unlinkSync(tmp);
+    } catch (_) {
+    }
+    if (url) {
+      this.coverCache.set(fp, url);
+      this.paintCover(art, url);
+    }
+  }
+  paintCover(art, url) {
+    const sh = art.querySelector(".djvu-cover-shimmer");
+    if (sh) sh.remove();
+    art.createEl("img", { cls: "djvu-cover-img", attr: { src: url } });
+  }
+  async openBook(file) {
+    try {
+      let leaf = this.app.workspace.getLeaf(false);
+      if (leaf && leaf.view && leaf.view.getViewType() === VIEW_TYPE_SHELF) leaf = this.app.workspace.getLeaf(true);
+      await leaf.openFile(file);
+    } catch (e) {
+      this.plugin.log("[shelf] openBook fail", e && e.message);
+    }
+  }
+  async onClose() {
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+    this.coverFiles.clear();
+  }
+};
 var DjvuSettingTab = class extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -681,57 +822,71 @@ module.exports = class DjvuReaderPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.resolvedBin = "";
+    this._nodePath = "";
     this.addSettingTab(new DjvuSettingTab(this.app, this));
     this.registerView(VIEW_TYPE, (leaf) => new DjvuView(leaf, this));
+    this.registerView(VIEW_TYPE_SHELF, (leaf) => new ShelfView(leaf, this));
     this.registerExtensions(["djvu", "djv"], VIEW_TYPE);
+    this.addRibbonIcon("library", "\u041F\u043E\u043B\u043A\u0430 \u0431\u0438\u0431\u043B\u0438\u043E\u0442\u0435\u043A\u0438 DjVu", () => this.openShelf());
+    this.addCommand({ id: "djvu-open-shelf", name: "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043F\u043E\u043B\u043A\u0443 \u0431\u0438\u0431\u043B\u0438\u043E\u0442\u0435\u043A\u0438", callback: () => this.openShelf() });
     this.addCommand({
       id: "djvu-toggle-bookmark",
       name: "\u0417\u0430\u043A\u043B\u0430\u0434\u043A\u0430: \u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C/\u0443\u0431\u0440\u0430\u0442\u044C \u043D\u0430 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0435",
-      checkCallback: (c) => {
+      callback: () => {
         const v = this.activeDjvuView();
-        if (!v || !v.filePath) return false;
-        if (!c) v.toggleCurrentBookmark();
-        return true;
+        if (!v || !v.filePath) {
+          new Notice("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 DjVu-\u043A\u043D\u0438\u0433\u0443");
+          return;
+        }
+        v.toggleCurrentBookmark();
       }
     });
     this.addCommand({
       id: "djvu-open-bookmarks",
       name: "\u0417\u0430\u043A\u043B\u0430\u0434\u043A\u0438: \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0441\u043F\u0438\u0441\u043E\u043A \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u043A\u043D\u0438\u0433\u0438",
-      checkCallback: (c) => {
+      callback: () => {
         const v = this.activeDjvuView();
-        if (!v || !v.filePath) return false;
-        if (!c) v.openBookmarkList();
-        return true;
+        if (!v || !v.filePath) {
+          new Notice("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 DjVu-\u043A\u043D\u0438\u0433\u0443");
+          return;
+        }
+        v.openBookmarkList();
       }
     });
     this.addCommand({
       id: "djvu-ocr-page",
       name: "OCR: \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0442\u044C \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443 (tesseract.js)",
-      checkCallback: (c) => {
+      callback: () => {
         const v = this.activeDjvuView();
-        if (!v || !v.filePath) return false;
-        if (!c) v.ocrCurrentPageJs();
-        return true;
+        if (!v || !v.filePath) {
+          new Notice("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 DjVu-\u043A\u043D\u0438\u0433\u0443");
+          return;
+        }
+        v.ocrCurrentPageJs();
       }
     });
     this.addCommand({
       id: "djvu-ocr-book",
       name: "OCR: \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0442\u044C \u0432\u0441\u044E \u043A\u043D\u0438\u0433\u0443 (tesseract.js, \u043F\u043E\u0441\u0442\u0440\u0430\u043D\u0438\u0447\u043D\u043E)",
-      checkCallback: (c) => {
+      callback: () => {
         const v = this.activeDjvuView();
-        if (!v || !v.filePath) return false;
-        if (!c) v.ocrWholeBookJs();
-        return true;
+        if (!v || !v.filePath) {
+          new Notice("\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 DjVu-\u043A\u043D\u0438\u0433\u0443");
+          return;
+        }
+        v.ocrWholeBookJs();
       }
     });
     this.addCommand({
       id: "djvu-ocr-cancel",
       name: "OCR: \u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u0432\u0430\u043D\u0438\u0435",
-      checkCallback: (c) => {
+      callback: () => {
         const v = this.activeDjvuView();
-        if (!v || !v.filePath) return false;
-        if (!c) v.cancelOcr();
-        return true;
+        if (!v || !v.filePath) {
+          new Notice("\u041D\u0435\u0442 \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0439 DjVu-\u043A\u043D\u0438\u0433\u0438");
+          return;
+        }
+        v.cancelOcr();
       }
     });
     this.ensureWrap();
@@ -752,7 +907,16 @@ module.exports = class DjvuReaderPlugin extends Plugin {
       this.resolvedBin = d;
       this.log("[djvu] detected bin dir=", d || "(none)");
     });
-    this.log("[djvu] onload ok v1.3-js");
+    this.log("[djvu] onload ok v1.4-shelf");
+  }
+  async openShelf() {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SHELF)[0];
+    let leaf = existing;
+    if (!leaf) {
+      leaf = this.app.workspace.getLeaf(true);
+      await leaf.setViewState({ type: VIEW_TYPE_SHELF, active: true });
+    }
+    this.app.workspace.revealLeaf(leaf);
   }
   onunload() {
     if (_wrappedProto) {
@@ -788,13 +952,8 @@ module.exports = class DjvuReaderPlugin extends Plugin {
     const pf = process.env.ProgramFiles || "C:\\Program Files";
     const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
     const local = process.env.LOCALAPPDATA || "";
-    const appdata = process.env.APPDATA || "";
-    const cands = [
-      path.join(pf, "nodejs", "node.exe"),
-      path.join(pf86, "nodejs", "node.exe")
-    ];
+    const cands = [path.join(pf, "nodejs", "node.exe"), path.join(pf86, "nodejs", "node.exe")];
     if (local) cands.push(path.join(local, "Programs", "nodejs", "node.exe"));
-    if (appdata) cands.push(path.join(appdata, "npm", "node.exe"));
     for (const c of cands) {
       try {
         if (fs.existsSync(c)) {
